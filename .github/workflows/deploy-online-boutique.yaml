@@ -33,7 +33,7 @@ on:
           - staging
 
 env:
-  GCP_REGION: us-central1
+  GCP_REGION: us-east1
   GKE_CLUSTER_NAME: online-boutique
   HELM_VERSION: v3.14.0
 
