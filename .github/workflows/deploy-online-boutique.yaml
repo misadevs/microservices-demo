@@ -230,30 +230,40 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
-      - name: Add Prometheus Helm Repository
+      - name: Add Helm Repositories
         run: |
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
           helm repo update
 
       - name: Create Monitoring Namespace
         run: |
           kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Deploy Prometheus Stack
+      - name: Deploy Prometheus (Simple)
         run: |
-          helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+          helm upgrade --install prometheus prometheus-community/prometheus \
             --namespace monitoring \
-            --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
-            --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
-            --set grafana.adminPassword=admin123 \
-            --set grafana.service.type=LoadBalancer \
-            --set prometheusOperator.admissionWebhooks.enabled=false \
-            --set prometheusOperator.tls.enabled=false \
-            --set nodeExporter.enabled=false \
-            --set kubeControllerManager.enabled=false \
-            --set kubeScheduler.enabled=false \
-            --set kubeProxy.enabled=false \
-            --set kubeEtcd.enabled=false \
+            --set server.service.type=LoadBalancer \
+            --set alertmanager.enabled=false \
+            --set kube-state-metrics.enabled=true \
+            --set prometheus-node-exporter.enabled=false \
+            --set prometheus-pushgateway.enabled=false \
+            --wait \
+            --timeout 10m
+
+      - name: Deploy Grafana
+        run: |
+          helm upgrade --install grafana grafana/grafana \
+            --namespace monitoring \
+            --set adminPassword=admin123 \
+            --set service.type=LoadBalancer \
+            --set datasources."datasources\.yaml".apiVersion=1 \
+            --set datasources."datasources\.yaml".datasources[0].name=Prometheus \
+            --set datasources."datasources\.yaml".datasources[0].type=prometheus \
+            --set datasources."datasources\.yaml".datasources[0].url=http://prometheus-server:80 \
+            --set datasources."datasources\.yaml".datasources[0].access=proxy \
+            --set datasources."datasources\.yaml".datasources[0].isDefault=true \
             --wait \
             --timeout 10m
 
@@ -266,7 +276,7 @@ jobs:
         run: |
           echo "Waiting for Grafana LoadBalancer IP..."
           for i in {1..30}; do
-            GRAFANA_IP=$(kubectl get service prometheus-grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            GRAFANA_IP=$(kubectl get service grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
             if [ -n "$GRAFANA_IP" ]; then
               echo "grafana_ip=$GRAFANA_IP" >> $GITHUB_OUTPUT
               echo "Grafana IP: $GRAFANA_IP"
@@ -366,7 +376,8 @@ jobs:
       - name: Display Access Information
         run: |
           FRONTEND_IP=$(kubectl get service frontend-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          GRAFANA_IP=$(kubectl get service prometheus-grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
+          GRAFANA_IP=$(kubectl get service grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
+          PROMETHEUS_IP=$(kubectl get service prometheus-server -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
           
           echo ""
           echo "=============================================="
@@ -381,9 +392,8 @@ jobs:
           echo "  Username: admin"
           echo "  Password: admin123"
           echo ""
-          echo "Prometheus (via port-forward):"
-          echo "  kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n monitoring"
-          echo "  URL: http://localhost:9090"
+          echo "Prometheus:"
+          echo "  URL: http://$PROMETHEUS_IP"
           echo ""
           echo "Cluster Info:"
           echo "  Name: ${{ needs.deploy-infrastructure.outputs.cluster_name }}"
@@ -395,7 +405,7 @@ jobs:
       - name: Create Summary
         run: |
           FRONTEND_IP=$(kubectl get service frontend-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          GRAFANA_IP=$(kubectl get service prometheus-grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
+          GRAFANA_IP=$(kubectl get service grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
           
           echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
