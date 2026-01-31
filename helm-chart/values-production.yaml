@@ -1,0 +1,200 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Production values for Online Boutique
+# This file overrides default values for production deployments
+# Used by: .github/workflows/deploy-online-boutique.yaml
+
+images:
+  repository: us-central1-docker.pkg.dev/google-samples/microservices-demo
+  tag: ""
+
+serviceAccounts:
+  create: true
+  annotations: {}
+
+# Enable network policies for security in production
+networkPolicies:
+  create: true
+
+# Enable security context
+securityContext:
+  enable: true
+
+seccompProfile:
+  enable: true
+  type: RuntimeDefault
+
+# Google Cloud Operations - Enable for production monitoring
+googleCloudOperations:
+  profiler: true
+  tracing: true
+  metrics: true
+
+# OpenTelemetry Collector for metrics export
+opentelemetryCollector:
+  create: true
+  name: opentelemetrycollector
+  projectId: "PROJECT_ID"
+
+# =============================================
+# Service Configurations with Production Resources
+# =============================================
+
+adService:
+  create: true
+  name: adservice
+  resources:
+    requests:
+      cpu: 200m
+      memory: 180Mi
+    limits:
+      cpu: 400m
+      memory: 400Mi
+
+cartService:
+  create: true
+  name: cartservice
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      cpu: 400m
+      memory: 512Mi
+
+checkoutService:
+  create: true
+  name: checkoutservice
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+currencyService:
+  create: true
+  name: currencyservice
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+emailService:
+  create: true
+  name: emailservice
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+frontend:
+  create: true
+  name: frontend
+  externalService: true
+  cymbalBranding: false
+  # Platform is set via --set flag in CI/CD
+  platform: gcp
+  singleSharedSession: false
+  virtualService:
+    create: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+# Load Generator - Enable for continuous load testing
+loadGenerator:
+  create: true
+  name: loadgenerator
+  checkFrontendInitContainer: true
+  resources:
+    requests:
+      cpu: 300m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+paymentService:
+  create: true
+  name: paymentservice
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+productCatalogService:
+  create: true
+  name: productcatalogservice
+  extraLatency: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+recommendationService:
+  create: true
+  name: recommendationservice
+  resources:
+    requests:
+      cpu: 100m
+      memory: 220Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+shippingService:
+  create: true
+  name: shippingservice
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+# Redis Database Configuration
+cartDatabase:
+  type: redis
+  connectionString: "redis-cart:6379"
+  inClusterRedis:
+    create: true
+    name: redis-cart
+    publicRepository: true
+  externalRedisTlsOrigination:
+    enable: false
+
+# Shopping Assistant - Disabled by default
+shoppingAssistantService:
+  create: false
+  name: shoppingassistantservice

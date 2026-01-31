@@ -1,0 +1,407 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Deploy Online Boutique
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/README.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  GCP_REGION: us-central1
+  GKE_CLUSTER_NAME: online-boutique
+  HELM_VERSION: v3.14.0
+
+jobs:
+  # ============================================
+  # JOB 1: Validate Terraform and Helm
+  # ============================================
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: terraform/
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+        working-directory: terraform/
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: terraform/
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm Lint
+        run: helm lint .
+        working-directory: helm-chart/
+
+  # ============================================
+  # JOB 2: Deploy Infrastructure with Terraform
+  # ============================================
+  deploy-infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      cluster_name: ${{ steps.terraform-output.outputs.cluster_name }}
+      cluster_location: ${{ steps.terraform-output.outputs.cluster_location }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.GCP_PROJECT_ID }}-terraform-state" \
+            -backend-config="prefix=online-boutique"
+        working-directory: terraform/
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var="region=${{ env.GCP_REGION }}" \
+            -var="name=${{ env.GKE_CLUSTER_NAME }}" \
+            -var="memorystore=false" \
+            -var="skip_kubectl_apply=true" \
+            -var="deletion_protection=false" \
+            -out=tfplan
+        working-directory: terraform/
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+        working-directory: terraform/
+
+      - name: Get Terraform Outputs
+        id: terraform-output
+        run: |
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> $GITHUB_OUTPUT
+          echo "cluster_location=$(terraform output -raw cluster_location)" >> $GITHUB_OUTPUT
+        working-directory: terraform/
+
+  # ============================================
+  # JOB 3: Deploy Online Boutique Application
+  # ============================================
+  deploy-application:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: deploy-infrastructure
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: 'gke-gcloud-auth-plugin'
+
+      - name: Get GKE Credentials
+        run: |
+          gcloud container clusters get-credentials ${{ needs.deploy-infrastructure.outputs.cluster_name }} \
+            --region ${{ needs.deploy-infrastructure.outputs.cluster_location }} \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Deploy Online Boutique with Helm
+        run: |
+          helm upgrade --install online-boutique ./helm-chart \
+            --namespace default \
+            --values helm-chart/values-production.yaml \
+            --set frontend.platform=gcp \
+            --wait \
+            --timeout 10m
+
+      - name: Wait for Pods to be Ready
+        run: |
+          echo "Waiting for all pods to be ready..."
+          kubectl wait --for=condition=ready pods --all --timeout=300s
+          echo "All pods are ready!"
+
+      - name: Get Frontend External IP
+        id: frontend-ip
+        run: |
+          echo "Waiting for LoadBalancer IP..."
+          for i in {1..30}; do
+            EXTERNAL_IP=$(kubectl get service frontend-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            if [ -n "$EXTERNAL_IP" ]; then
+              echo "frontend_ip=$EXTERNAL_IP" >> $GITHUB_OUTPUT
+              echo "Frontend IP: $EXTERNAL_IP"
+              break
+            fi
+            echo "Waiting for external IP... (attempt $i/30)"
+            sleep 10
+          done
+
+  # ============================================
+  # JOB 4: Deploy Monitoring Stack
+  # ============================================
+  deploy-monitoring:
+    name: Deploy Monitoring
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, deploy-application]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: 'gke-gcloud-auth-plugin'
+
+      - name: Get GKE Credentials
+        run: |
+          gcloud container clusters get-credentials ${{ needs.deploy-infrastructure.outputs.cluster_name }} \
+            --region ${{ needs.deploy-infrastructure.outputs.cluster_location }} \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Add Prometheus Helm Repository
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      - name: Create Monitoring Namespace
+        run: |
+          kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy Prometheus Stack
+        run: |
+          helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+            --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+            --set grafana.adminPassword=admin123 \
+            --set grafana.service.type=LoadBalancer \
+            --wait \
+            --timeout 10m
+
+      - name: Wait for Monitoring Pods
+        run: |
+          kubectl wait --for=condition=ready pods --all -n monitoring --timeout=300s
+
+      - name: Get Grafana External IP
+        id: grafana-ip
+        run: |
+          echo "Waiting for Grafana LoadBalancer IP..."
+          for i in {1..30}; do
+            GRAFANA_IP=$(kubectl get service prometheus-grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            if [ -n "$GRAFANA_IP" ]; then
+              echo "grafana_ip=$GRAFANA_IP" >> $GITHUB_OUTPUT
+              echo "Grafana IP: $GRAFANA_IP"
+              break
+            fi
+            echo "Waiting for Grafana IP... (attempt $i/30)"
+            sleep 10
+          done
+
+  # ============================================
+  # JOB 5: Smoke Test
+  # ============================================
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, deploy-monitoring]
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: 'gke-gcloud-auth-plugin'
+
+      - name: Get GKE Credentials
+        run: |
+          gcloud container clusters get-credentials ${{ needs.deploy-infrastructure.outputs.cluster_name }} \
+            --region ${{ needs.deploy-infrastructure.outputs.cluster_location }} \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Verify All Deployments
+        run: |
+          echo "=== Checking Deployment Status ==="
+          kubectl get deployments -o wide
+          
+          echo ""
+          echo "=== Checking Pod Status ==="
+          kubectl get pods -o wide
+          
+          echo ""
+          echo "=== Checking Services ==="
+          kubectl get services
+
+      - name: Test Frontend Endpoint
+        run: |
+          FRONTEND_IP=$(kubectl get service frontend-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "Testing frontend at http://$FRONTEND_IP"
+          
+          # Wait for frontend to respond
+          for i in {1..10}; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$FRONTEND_IP" || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Frontend is responding with HTTP 200!"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $HTTP_CODE - waiting..."
+            sleep 5
+          done
+          
+          echo "Frontend health check failed"
+          exit 1
+
+      - name: Check Load Generator Metrics
+        run: |
+          echo "Checking Load Generator status..."
+          kubectl logs -l app=loadgenerator --tail=20 || true
+
+  # ============================================
+  # JOB 6: Output URLs and Summary
+  # ============================================
+  output-urls:
+    name: Output URLs
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, smoke-test]
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: 'gke-gcloud-auth-plugin'
+
+      - name: Get GKE Credentials
+        run: |
+          gcloud container clusters get-credentials ${{ needs.deploy-infrastructure.outputs.cluster_name }} \
+            --region ${{ needs.deploy-infrastructure.outputs.cluster_location }} \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Display Access Information
+        run: |
+          FRONTEND_IP=$(kubectl get service frontend-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          GRAFANA_IP=$(kubectl get service prometheus-grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
+          
+          echo ""
+          echo "=============================================="
+          echo "       DEPLOYMENT COMPLETED SUCCESSFULLY      "
+          echo "=============================================="
+          echo ""
+          echo "Online Boutique Store:"
+          echo "  URL: http://$FRONTEND_IP"
+          echo ""
+          echo "Grafana Dashboard:"
+          echo "  URL: http://$GRAFANA_IP"
+          echo "  Username: admin"
+          echo "  Password: admin123"
+          echo ""
+          echo "Prometheus (via port-forward):"
+          echo "  kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n monitoring"
+          echo "  URL: http://localhost:9090"
+          echo ""
+          echo "Cluster Info:"
+          echo "  Name: ${{ needs.deploy-infrastructure.outputs.cluster_name }}"
+          echo "  Location: ${{ needs.deploy-infrastructure.outputs.cluster_location }}"
+          echo "  Project: ${{ secrets.GCP_PROJECT_ID }}"
+          echo ""
+          echo "=============================================="
+
+      - name: Create Summary
+        run: |
+          FRONTEND_IP=$(kubectl get service frontend-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          GRAFANA_IP=$(kubectl get service prometheus-grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
+          
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Access URLs" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| Online Boutique | http://$FRONTEND_IP |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | http://$GRAFANA_IP |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Grafana Credentials" >> $GITHUB_STEP_SUMMARY
+          echo "- **Username:** admin" >> $GITHUB_STEP_SUMMARY
+          echo "- **Password:** admin123" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Cluster Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cluster:** ${{ needs.deploy-infrastructure.outputs.cluster_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region:** ${{ needs.deploy-infrastructure.outputs.cluster_location }}" >> $GITHUB_STEP_SUMMARY

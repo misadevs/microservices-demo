@@ -49,9 +49,8 @@ resource "google_container_cluster" "my_cluster" {
   ip_allocation_policy {
   }
 
-  # Avoid setting deletion_protection to false
-  # until you're ready (and certain you want) to destroy the cluster.
-  # deletion_protection = false
+  # Deletion protection - set to false via variable when you want to destroy
+  deletion_protection = var.deletion_protection
 
   depends_on = [
     module.enable_google_apis
@@ -73,7 +72,10 @@ module "gcloud" {
 }
 
 # Apply YAML kubernetes-manifest configurations
+# This step is skipped when skip_kubectl_apply is true (for CI/CD with Helm)
 resource "null_resource" "apply_deployment" {
+  count = var.skip_kubectl_apply ? 0 : 1
+
   provisioner "local-exec" {
     interpreter = ["bash", "-exc"]
     command     = "kubectl apply -k ${var.filepath_manifest} -n ${var.namespace}"
@@ -85,7 +87,10 @@ resource "null_resource" "apply_deployment" {
 }
 
 # Wait condition for all Pods to be ready before finishing
+# This step is skipped when skip_kubectl_apply is true (for CI/CD with Helm)
 resource "null_resource" "wait_conditions" {
+  count = var.skip_kubectl_apply ? 0 : 1
+
   provisioner "local-exec" {
     interpreter = ["bash", "-exc"]
     command     = <<-EOT

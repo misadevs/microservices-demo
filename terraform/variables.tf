@@ -44,4 +44,17 @@ variable "filepath_manifest" {
 variable "memorystore" {
   type        = bool
   description = "If true, Online Boutique's in-cluster Redis cache will be replaced with a Google Cloud Memorystore Redis cache"
+  default     = false
+}
+
+variable "skip_kubectl_apply" {
+  type        = bool
+  description = "If true, skip kubectl apply step. Useful for CI/CD pipelines that deploy with Helm instead."
+  default     = false
+}
+
+variable "deletion_protection" {
+  type        = bool
+  description = "If true, prevents accidental deletion of the GKE cluster"
+  default     = true
 }
