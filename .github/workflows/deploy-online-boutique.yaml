@@ -247,6 +247,13 @@ jobs:
             --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
             --set grafana.adminPassword=admin123 \
             --set grafana.service.type=LoadBalancer \
+            --set prometheusOperator.admissionWebhooks.enabled=false \
+            --set prometheusOperator.tls.enabled=false \
+            --set nodeExporter.enabled=false \
+            --set kubeControllerManager.enabled=false \
+            --set kubeScheduler.enabled=false \
+            --set kubeProxy.enabled=false \
+            --set kubeEtcd.enabled=false \
             --wait \
             --timeout 10m
 
